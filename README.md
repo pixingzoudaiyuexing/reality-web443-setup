@@ -18,8 +18,10 @@
 
 ## 使用方法
 
+在服务器上复制下面这一行运行：
+
 ```bash
-bash reality-web443-setup.sh
+wget -O reality-web443-setup.sh https://raw.githubusercontent.com/pixingzoudaiyuexing/reality-web443-setup/main/reality-web443-setup.sh && bash reality-web443-setup.sh
 ```
 
 按提示输入：
