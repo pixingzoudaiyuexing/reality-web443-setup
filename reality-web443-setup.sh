@@ -75,11 +75,82 @@ detect_public_ip() {
   printf '%s' "$ip"
 }
 
+disable_backports_list_sources() {
+  local backup_suffix
+  backup_suffix="$(date +%Y%m%d%H%M%S)"
+  local file
+
+  for file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
+    [ -f "$file" ] || continue
+    if grep -Eq '^[[:space:]]*deb(-src)?[[:space:]].*[[:space:]][^[:space:]]+-backports([[:space:]]|$)' "$file"; then
+      cp -a "$file" "${file}.bak-reality-web443-${backup_suffix}"
+      sed -i -E '/^[[:space:]]*#/! s#^([[:space:]]*deb(-src)?[[:space:]].*[[:space:]][^[:space:]]+-backports([[:space:]]|$).*)$#\# disabled by reality-web443 setup: \1#' "$file"
+      ok "已备份并禁用失效 backports 源：$file"
+    fi
+  done
+}
+
+disable_backports_deb822_sources() {
+  local backup_suffix
+  backup_suffix="$(date +%Y%m%d%H%M%S)"
+  local file tmp
+
+  for file in /etc/apt/sources.list.d/*.sources; do
+    [ -f "$file" ] || continue
+    if grep -Eq '^[[:space:]]*Suites:[[:space:]].*-backports([[:space:]]|$)' "$file"; then
+      cp -a "$file" "${file}.bak-reality-web443-${backup_suffix}"
+      tmp="$(mktemp)"
+      awk '
+        function flush( i, is_backports) {
+          if (n == 0) return
+          is_backports = 0
+          for (i = 1; i <= n; i++) {
+            if (buf[i] ~ /^[[:space:]]*Suites:[[:space:]].*-backports([[:space:]]|$)/) {
+              is_backports = 1
+            }
+          }
+          for (i = 1; i <= n; i++) {
+            if (is_backports && buf[i] !~ /^[[:space:]]*#/ && buf[i] !~ /^[[:space:]]*$/) {
+              print "# disabled by reality-web443 setup: " buf[i]
+            } else {
+              print buf[i]
+            }
+          }
+          n = 0
+        }
+        /^[[:space:]]*$/ { flush(); print; next }
+        { buf[++n] = $0 }
+        END { flush() }
+      ' "$file" >"$tmp"
+      mv "$tmp" "$file"
+      ok "已备份并禁用失效 backports 源：$file"
+    fi
+  done
+}
+
+apt_update_with_backports_fix() {
+  local log_file="/tmp/reality-web443-apt-update.log"
+
+  if apt-get update 2>&1 | tee "$log_file"; then
+    return 0
+  fi
+
+  if grep -qi 'backports' "$log_file" && grep -qi 'does not have a Release file' "$log_file"; then
+    warn "检测到系统里的 backports 软件源已经失效，正在自动备份并禁用它。"
+    disable_backports_list_sources
+    disable_backports_deb822_sources
+    apt-get update
+    return 0
+  fi
+
+  die "apt-get update 失败。详细日志：$log_file"
+}
+
 install_packages() {
   log "正在安装 Nginx、Certbot 和基础工具"
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update
+    apt_update_with_backports_fix
     apt-get install -y nginx certbot python3-certbot-nginx curl ca-certificates iptables
   else
     die "当前脚本只支持使用 apt-get 的 Debian/Ubuntu 系统。"

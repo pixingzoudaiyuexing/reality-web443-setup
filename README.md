@@ -24,6 +24,8 @@
 wget -O reality-web443-setup.sh https://raw.githubusercontent.com/pixingzoudaiyuexing/reality-web443-setup/main/reality-web443-setup.sh && bash reality-web443-setup.sh
 ```
 
+如果旧 Debian 系统提示 `bullseye-backports Release file` 之类的 APT 源错误，请重新运行上面这条命令拉取最新版脚本。新版脚本会自动备份并禁用失效的 backports 源。
+
 按提示输入：
 
 - 网站域名，例如 `op.i4ktv.top`
