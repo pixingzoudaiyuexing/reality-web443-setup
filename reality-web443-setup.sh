@@ -62,10 +62,6 @@ safe_unit_name() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9_' '-'
 }
 
-safe_nginx_var_name() {
-  printf '%s' "$1" | tr -c 'A-Za-z0-9_' '_'
-}
-
 detect_public_ip() {
   local ip=""
   ip="$(curl -4fsS --max-time 8 https://api.ipify.org 2>/dev/null || true)"
@@ -227,11 +223,11 @@ write_nginx_config() {
   local web_port="$2"
   local fallback_port="$3"
   local safe_name
-  local var_suffix
+  local var_hash
   local conn_var
   safe_name="$(safe_unit_name "$domain")"
-  var_suffix="$(safe_nginx_var_name "${domain}_${fallback_port}")"
-  conn_var="reality_connection_upgrade_${var_suffix}"
+  var_hash="$(printf '%s' "${domain}_${fallback_port}" | cksum | awk '{print $1}')"
+  conn_var="r_conn_upgrade_${var_hash}"
 
   log "正在写入 Nginx 反向代理配置"
   if [ -L /etc/nginx/sites-enabled/default ]; then
@@ -246,7 +242,7 @@ map \$http_upgrade \$${conn_var} {
 }
 
 server {
-    listen 127.0.0.1:${fallback_port} ssl http2;
+    listen 127.0.0.1:${fallback_port} ssl;
     server_name ${domain};
 
     ssl_certificate /etc/letsencrypt/live/${domain}/fullchain.pem;
