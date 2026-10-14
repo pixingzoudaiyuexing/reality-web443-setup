@@ -58,6 +58,17 @@ valid_port() {
   [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]
 }
 
+valid_ipv4() {
+  local ip="$1" octet
+  local -a octets
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS=. read -r -a octets <<<"$ip"
+  [ "${#octets[@]}" -eq 4 ] || return 1
+  for octet in "${octets[@]}"; do
+    [ "$((10#$octet))" -le 255 ] || return 1
+  done
+}
+
 safe_unit_name() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9_' '-'
 }
@@ -284,17 +295,14 @@ EOF
   ok "Certbot 自动续期定时器和 Nginx 重载脚本已准备好"
 }
 
-setup_nat_redirect() {
-  local public_ip="$1"
-  local fallback_port="$2"
-  local domain="$3"
-  local safe_name
-  safe_name="$(safe_unit_name "$domain")"
-  local service="/etc/systemd/system/reality-web443-${safe_name}-redirect.service"
+# 纯文件生成函数，方便回归测试与检查端口是否正确写入。
+write_nat_unit() {
+  local service="$1"
+  local public_ip="$2"
+  local reality_port="$3"
+  local fallback_port="$4"
+  local domain="$5"
 
-  [ -n "$public_ip" ] || die "NAT 兼容转发需要填写服务器公网 IP。"
-
-  log "正在创建 NAT 兼容转发服务"
   cat >"$service" <<EOF
 [Unit]
 Description=Redirect local REALITY fallback traffic for ${domain}
@@ -304,17 +312,52 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -c '/usr/sbin/iptables -t nat -C OUTPUT -p tcp -d ${public_ip} --dport 443 -j REDIRECT --to-ports ${fallback_port} 2>/dev/null || /usr/sbin/iptables -t nat -A OUTPUT -p tcp -d ${public_ip} --dport 443 -j REDIRECT --to-ports ${fallback_port}'
-ExecStop=/bin/sh -c '/usr/sbin/iptables -t nat -D OUTPUT -p tcp -d ${public_ip} --dport 443 -j REDIRECT --to-ports ${fallback_port} 2>/dev/null || true'
+ExecStart=/bin/sh -c '/usr/sbin/iptables -t nat -C OUTPUT -p tcp -d ${public_ip} --dport ${reality_port} -j REDIRECT --to-ports ${fallback_port} 2>/dev/null || /usr/sbin/iptables -t nat -A OUTPUT -p tcp -d ${public_ip} --dport ${reality_port} -j REDIRECT --to-ports ${fallback_port}'
+ExecStop=/bin/sh -c '/usr/sbin/iptables -t nat -D OUTPUT -p tcp -d ${public_ip} --dport ${reality_port} -j REDIRECT --to-ports ${fallback_port} 2>/dev/null || true'
 
 [Install]
 WantedBy=multi-user.target
 EOF
+}
 
+setup_nat_redirect() {
+  local public_ip="$1"
+  local reality_port="$2"
+  local fallback_port="$3"
+  local domain="$4"
+  local safe_name unit_name service
+  safe_name="$(safe_unit_name "$domain")"
+  unit_name="reality-web443-${safe_name}-redirect.service"
+  service="/etc/systemd/system/${unit_name}"
+
+  valid_ipv4 "$public_ip" || die "NAT 兼容转发需要填写有效的服务器公网 IPv4 地址。"
+
+  log "正在创建 NAT 兼容转发服务"
+  # 先停止已加载的旧 unit，确保重装并修改端口/IP 时旧规则被撤销。
+  if systemctl is-active --quiet "$unit_name" 2>/dev/null; then
+    systemctl stop "$unit_name" || die "停止旧 NAT 转发服务失败，请检查旧规则。"
+  fi
+
+  write_nat_unit "$service" "$public_ip" "$reality_port" "$fallback_port" "$domain"
   systemd-analyze verify "$service"
   systemctl daemon-reload
-  systemctl enable --now "reality-web443-${safe_name}-redirect.service"
-  ok "NAT 兼容转发已启用：${public_ip}:443 -> 127.0.0.1:${fallback_port}"
+  systemctl enable --now "$unit_name"
+  ok "NAT 兼容转发已启用：${public_ip}:${reality_port} -> 127.0.0.1:${fallback_port}"
+}
+
+disable_nat_redirect() {
+  local domain="$1"
+  local safe_name unit_name service
+  safe_name="$(safe_unit_name "$domain")"
+  unit_name="reality-web443-${safe_name}-redirect.service"
+  service="/etc/systemd/system/${unit_name}"
+
+  [ -f "$service" ] || return 0
+  log "正在清理此域名以前安装的 NAT 兼容转发服务"
+  systemctl disable --now "$unit_name" || die "清理旧 NAT 兼容转发服务失败。"
+  rm -f "$service"
+  systemctl daemon-reload
+  ok "已删除旧 NAT 兼容转发服务"
 }
 
 test_local_https() {
@@ -336,6 +379,11 @@ print_panel_tips() {
   local domain="$1"
   local fallback_port="$2"
   local public_ip="$3"
+  local reality_port="$4"
+  local website_url="https://${domain}"
+  if [ "$reality_port" -ne 443 ]; then
+    website_url="https://${domain}:${reality_port}"
+  fi
 
   cat <<EOF
 
@@ -347,14 +395,18 @@ print_panel_tips() {
   Server Port:       ${fallback_port}
   Proxy Protocol:    0
 
-外部客户端/节点连接信息保持不变：
+外部客户端/节点连接信息（必须与 REALITY 监听端口一致）：
 
   Address: ${public_ip:-你的服务器公网IP}
-  Port:    443
+  Port:    ${reality_port}
 
 保存面板配置并重启节点后，浏览器打开：
 
-  https://${domain}
+  ${website_url}
+
+注意：上述网站地址能否访问，取决于 REALITY 是否把
+对应 SNI 的 HTTPS 流量转发到本机回落端口。
+域名证书的 HTTP-01 申请及续期仍要求公网 TCP 80 可达。
 ============================================================
 
 EOF
@@ -363,22 +415,27 @@ EOF
 main() {
   need_root
 
-  echo "REALITY 443 + 网站 HTTPS 复用部署脚本"
+  echo "REALITY + 网站 HTTPS 复用部署脚本（支持自定义 REALITY 端口）"
   echo
 
-  local domain web_port fallback_port email public_ip
+  local domain web_port fallback_port reality_port email public_ip
   prompt_required domain "请输入网站域名，例如 op.i4ktv.top"
   prompt_default web_port "请输入后端网页 HTTP 端口，例如 OpenList 是 5244" "5244"
   valid_port "$web_port" || die "后端网页端口无效：$web_port"
   prompt_default fallback_port "请输入内部 HTTPS 回落端口" "8443"
   valid_port "$fallback_port" || die "内部 HTTPS 回落端口无效：$fallback_port"
+  prompt_default reality_port "请输入 REALITY 节点实际监听的公网 TCP 端口" "443"
+  valid_port "$reality_port" || die "REALITY 监听端口无效：$reality_port"
 
-  if [ "$web_port" = "$fallback_port" ]; then
-    die "后端网页端口和内部 HTTPS 回落端口不能相同。"
+  if [ "$web_port" = "$fallback_port" ] || [ "$reality_port" = "$fallback_port" ] || [ "$reality_port" = "$web_port" ]; then
+    die "后端网页端口、内部 HTTPS 回落端口和 REALITY 监听端口不能相同。"
+  fi
+  if [ "$reality_port" = "80" ]; then
+    die "REALITY 不能使用端口 80：本脚本通过 TCP 80 完成证书的 HTTP-01 申请和续期。"
   fi
 
   public_ip="$(detect_public_ip)"
-  prompt_default public_ip "请输入服务器公网 IP，用于检查解析和可选 NAT 兼容转发" "${public_ip:-}"
+  prompt_default public_ip "请输入服务器公网 IPv4，用于检查解析和可选 NAT 兼容转发" "${public_ip:-}"
   read -r -p "请输入 Let's Encrypt 邮箱，可选，直接回车跳过: " email
 
   install_packages
@@ -389,11 +446,12 @@ main() {
   write_renew_hook
   test_local_https "$domain" "$fallback_port"
 
-  print_panel_tips "$domain" "$fallback_port" "$public_ip"
+  print_panel_tips "$domain" "$fallback_port" "$public_ip" "$reality_port"
 
-  if prompt_yes_no "如果你的面板里 REALITY 的 Server Address/Port 仍然是 域名:443，是否添加 NAT 兼容转发？" "n"; then
-    setup_nat_redirect "$public_ip" "$fallback_port" "$domain"
+  if prompt_yes_no "如果你的面板里 REALITY 的 Server Address/Port 仍然是 域名:${reality_port}，是否添加 NAT 兼容转发？" "n"; then
+    setup_nat_redirect "$public_ip" "$reality_port" "$fallback_port" "$domain"
   else
+    disable_nat_redirect "$domain"
     warn "未添加 NAT 兼容转发。请在面板里把 Server Address/Port 设置为 127.0.0.1:${fallback_port}。"
   fi
 
@@ -404,4 +462,7 @@ main() {
   ok "全部完成"
 }
 
-main "$@"
+# 被测试脚本 source 时不执行实际安装。
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
