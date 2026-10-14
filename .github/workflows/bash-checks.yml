@@ -1,0 +1,13 @@
+name: Bash checks
+on:
+  push:
+  pull_request:
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bash syntax
+        run: bash -n reality-web443-setup.sh && bash -n tests/test_ports.sh
+      - name: Port regression tests
+        run: bash tests/test_ports.sh
