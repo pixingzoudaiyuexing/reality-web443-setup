@@ -1,73 +1,79 @@
-# REALITY 443 + 网站 HTTPS 复用脚本
+# REALITY + 网站 HTTPS 复用脚本（支持非 443 端口）
 
-这是一个交互式 Bash 脚本，用来把已有网站服务复用到 REALITY 节点的 443 端口上。
+这是一个交互式 Bash 脚本，将已有网站服务作为 REALITY 的 HTTPS 回落站点。支持 REALITY 监听 **443 或自定义 TCP 端口**（例如 2053、2083、8443）。
 
 典型场景：
 
-- REALITY/VLESS 节点已经占用公网 `443`
-- 网站程序运行在本机 HTTP 端口，例如 OpenList 的 `5244`
-- 希望浏览器访问 `https://你的域名` 时也走 `443`
+- REALITY/VLESS 节点监听公网 `443`、`2053` 或其他合法 TCP 端口。
+- 网站程序运行在本机 HTTP 端口，例如 OpenList 的 `5244`。
+- 网站通过 REALITY 对指定 SNI 的回落，在相同端口提供 HTTPS 访问。
 
-脚本会自动完成：
+脚本会：
 
-- 安装 Nginx、Certbot、iptables 等基础工具
-- 为输入的域名申请 Let's Encrypt 证书
-- 创建本机 HTTPS 回落反代，例如 `127.0.0.1:8443 -> 127.0.0.1:5244`
-- 安装证书续期后自动重载 Nginx 的 hook
-- 可选创建 NAT 兼容转发，适合面板里暂时仍使用 `域名:443` 作为 REALITY 回落目标的情况
+- 安装 Nginx、Certbot、iptables 等基础工具。
+- 为输入的域名申请 Let's Encrypt 证书（**HTTP-01 仍需要公网 TCP 80 可达**）。
+- 创建本机 HTTPS 回落反代，例如 `127.0.0.1:8443 -> 127.0.0.1:5244`。
+- 安装证书续期后自动重载 Nginx 的 hook。
+- 可选创建 NAT 兼容转发，匹配用户填写的 **REALITY 实际监听端口**，而非固定 443。
+- 重复运行时更新同域名的 NAT 服务；不启用 NAT 时清理同域名以前创建的 NAT 服务。
 
-## 使用方法
-
-在服务器上复制下面这一行运行：
+## 一键运行
 
 ```bash
 wget -O reality-web443-setup.sh https://raw.githubusercontent.com/pixingzoudaiyuexing/reality-web443-setup/main/reality-web443-setup.sh && bash reality-web443-setup.sh
 ```
 
-如果旧 Debian 系统提示 `bullseye-backports Release file` 之类的 APT 源错误，请重新运行上面这条命令拉取最新版脚本。新版脚本会自动备份并禁用失效的 backports 源。
+如正在试用尚未合并的分支，将上面 URL 中的 `main` 改为对应分支名。
+
+如果旧 Debian 系统提示 `bullseye-backports Release file` 等 APT 源错误，脚本会自动备份并禁用检测到的失效 backports 源。
 
 按提示输入：
 
-- 网站域名，例如 `op.i4ktv.top`
-- 后端网页 HTTP 端口，例如 OpenList 是 `5244`
+- 网站域名，例如 `op.example.com`
+- 网页后端 HTTP 端口，例如 `5244`
 - 内部 HTTPS 回落端口，例如 `8443`
-- 服务器公网 IP
-- 是否添加 NAT 兼容转发
-- 是否运行 Certbot 自动续期模拟测试
+- **REALITY 实际监听的公网端口，默认 `443`**
+- 公网 IPv4 和证书邮箱
+- 是否需要 NAT 兼容转发及证书续期测试
 
-## 面板里的推荐设置
+## 面板推荐设置（无需 NAT）
 
-如果你的 REALITY 面板支持设置回落目标，推荐使用“干净回落”：
+以下两种外部端口均适用；回落端口 **不应与 REALITY 监听端口相同**。
 
 ```text
-Server Name (SNI): 你的域名
+Server Name (SNI): op.example.com
 Server Address:    127.0.0.1
-Server Port:       内部HTTPS回落端口，例如 8443
+Server Port:       8443
 Proxy Protocol:    0
 ```
 
-外部客户端连接信息保持不变：
+| 情况 | REALITY 公网监听端口 | 客户端端口 | 浏览器访问回落网站 |
+|---|---:|---:|---|
+| 默认 443 | 443 | 443 | `https://op.example.com` |
+| 自定义 2053 | 2053 | 2053 | `https://op.example.com:2053` |
 
-```text
-Address: 服务器公网IP或域名
-Port:    443
-```
+**注意：**REALITY 节点必须实际监听对应 TCP 端口，并把指定 SNI 的 HTTPS 回落流量转到 `127.0.0.1:8443`。脚本只配置网站/Nginx/可选 NAT，不修改 REALITY/Xray/v2node 的监听端口。云厂商安全组和服务器防火墙也需放行该公网 TCP 端口。
 
-## NAT 兼容转发是什么意思
+自定义端口不等于占用了标准 HTTPS 443；若无其他 HTTPS 服务在公网 443 上监听，直接访问 `https://op.example.com` 不会自动转到 `2053`。
 
-如果面板里 REALITY 的回落目标仍然是：
+## NAT 兼容转发
 
-```text
-Server Address: 你的域名
-Server Port:    443
-```
+如果面板的回落目标仍是 `op.example.com:2053`（而不是推荐的 `127.0.0.1:8443`），节点可能从服务器内部访问自身公网 IP。可选 NAT 转发会将服务器本机发往 `公网IPv4:2053` 的 TCP 流量重定向到内部 HTTPS 端口 `8443`。
 
-那么节点回落网站流量时可能会访问自己，导致超时。脚本里的 NAT 兼容转发会把服务器本机访问 `公网IP:443` 的流量转到内部 HTTPS 回落端口，例如 `127.0.0.1:8443`。
-
-如果你已经在面板里改成 `127.0.0.1:8443`，就不需要开启 NAT 兼容转发。
+- NAT 规则只影响本机发起的、目标为指定公网 IPv4 和指定 TCP 端口的连接，不负责公网入口转发。
+- 如果已经在面板里配置 `127.0.0.1:8443`，通常无需启用 NAT。
+- 同一域名重复执行脚本并变更端口/IP 时，会先停止旧 NAT 服务再安装新规则；选择不启用时会清理以前由本脚本为该域名创建的 NAT 服务。
+- NAT 当前只支持 **IPv4**。
 
 ## 证书续期
 
-脚本使用 Certbot 申请证书，并启用系统自带的 `certbot.timer`。证书续期成功后会自动 reload Nginx。
+脚本使用 Certbot standalone HTTP-01 验证首次申请证书，并启用 `certbot.timer`。请保持域名解析和公网 TCP `80` 可用，供证书申请与续期使用。REALITY 是否使用 443 **不影响** HTTP-01 的 TCP 80 要求。
 
-只要域名仍解析到服务器，并且 TCP `80` 端口能被 Let's Encrypt 访问，证书就可以自动续期。
+## 开发验证
+
+```bash
+bash -n reality-web443-setup.sh
+bash tests/test_ports.sh
+```
+
+测试仅校验参数、端口提示及生成的 NAT unit 文本，不会在服务器上安装软件或配置真实 NAT。
